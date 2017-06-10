@@ -97,7 +97,7 @@ package object AcaCustom
                     switch (state) {
                       is (s_ready) {
                         io.mem_port.req.valid := Bool(true)
-                        io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
+                        io.mem_port.req.bits.addr := Cat(tag_idx, cache_idx, Bits(0, 2))
                         io.mem_port.req.bits.data := new_block
                         io.mem_port.req.bits.fcn := M_XWR
                         io.mem_port.req.bits.typ := MT_WU
@@ -112,7 +112,7 @@ package object AcaCustom
                           state := s_ready
                         } .otherwise {
                           io.mem_port.req.valid := Bool(true)
-                          io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
+                          io.mem_port.req.bits.addr := Cat(tag_idx, cache_idx, Bits(0, 2))
                           io.mem_port.req.bits.data := new_block
                           io.mem_port.req.bits.fcn := M_XWR
                           io.mem_port.req.bits.typ := MT_WU
@@ -172,13 +172,14 @@ package object AcaCustom
                             val wdata = Fill(num_words_per_cache_line, StoreDataGen(req_data, req_typ))
                             val wmask = (StoreMask(req_typ) << bit_shift_amt)(block_width-1, 0)
                             data_bank(cache_idx) := Cat(
-                              Bits("b11", 2),
+                              // Bits("b11", 2),
+                              Bits("b10", 2),
                               tag_idx,
                               (orig_data & ~wmask) | (wdata & wmask)
                             )
                             // io.core_port.resp.bits.data := req_data
-                            io.core_port.resp.valid := Bool(true)
-                            io.core_port.req.ready := Bool(true)
+                            // io.core_port.resp.valid := Bool(true)
+                            // io.core_port.req.ready := Bool(true)
                             state := s_ready
                           } .otherwise {
                             io.mem_port.req.valid := Bool(true)
