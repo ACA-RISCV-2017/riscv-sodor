@@ -83,44 +83,6 @@ package object AcaCustom
                     // io.core_port.resp.bits.data := req_data
                     io.core_port.resp.valid := Bool(true)
                     io.core_port.req.ready := Bool(true)
-
-                    /* FIXME */
-                    // Something is very wrong, write-back cache will exception
-                    // write-through cache seems okay. test `fence.i` always crash
-                    // =(
-                    io.core_port.resp.valid := Bool(false)
-                    io.core_port.req.ready := Bool(false)
-                    val new_block = data_bank(cache_idx)
-                    // Need to write-back dirty data
-                    val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
-                    val state = Reg(init = s_ready)
-                    switch (state) {
-                      is (s_ready) {
-                        io.mem_port.req.valid := Bool(true)
-                        io.mem_port.req.bits.addr := Cat(tag_idx, cache_idx, Bits(0, 2))
-                        io.mem_port.req.bits.data := new_block
-                        io.mem_port.req.bits.fcn := M_XWR
-                        io.mem_port.req.bits.typ := MT_WU
-                        state := s_waiting
-                      }
-                      is (s_waiting) {
-                        when (io.mem_port.resp.valid) {
-                          io.mem_port.req.valid := Bool(false)
-                          data_bank(cache_idx) := Bits(0)
-                          io.core_port.resp.valid := Bool(true)
-                          io.core_port.req.ready := Bool(true)
-                          state := s_ready
-                        } .otherwise {
-                          io.mem_port.req.valid := Bool(true)
-                          io.mem_port.req.bits.addr := Cat(tag_idx, cache_idx, Bits(0, 2))
-                          io.mem_port.req.bits.data := new_block
-                          io.mem_port.req.bits.fcn := M_XWR
-                          io.mem_port.req.bits.typ := MT_WU
-                        }
-                      }
-                    }
-
-
                   } .otherwise {
                     // cache miss
                     io.core_port.req.ready := Bool(false)
@@ -130,24 +92,21 @@ package object AcaCustom
                       val state = Reg(init = s_ready)
                       switch (state) {
                         is (s_ready) {
-                          io.mem_port.req.valid := Bool(true)
-                          io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
-                          io.mem_port.req.bits.data := block
-                          io.mem_port.req.bits.fcn := M_XWR
-                          io.mem_port.req.bits.typ := MT_WU
-                          state := s_waiting
-                        }
-                        is (s_waiting) {
-                          when (io.mem_port.resp.valid) {
-                            io.mem_port.req.valid := Bool(false)
-                            data_bank(cache_idx) := Bits(0)
-                            state := s_ready
-                          } .otherwise {
+                          when (io.mem_port.req.ready) {
+                            // Send write request to main memory and wait
                             io.mem_port.req.valid := Bool(true)
                             io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
                             io.mem_port.req.bits.data := block
                             io.mem_port.req.bits.fcn := M_XWR
                             io.mem_port.req.bits.typ := MT_WU
+                            state := s_waiting
+                          }
+                        }
+                        is (s_waiting) {
+                          when (io.mem_port.resp.valid) {
+                  // Flush cache-line to all zero, cache-line is ready for new data
+                            data_bank(cache_idx) := Bits(0)
+                            state := s_ready
                           }
                         }
                       }
@@ -156,36 +115,26 @@ package object AcaCustom
                       val state = Reg(init = s_ready)
                       switch (state) {
                         is (s_ready) {
-                          io.mem_port.req.valid := Bool(true)
-                          io.mem_port.req.bits.addr := Cat(req_addr >> 2, Bits(0, 2))
-                          io.mem_port.req.bits.fcn := M_XRD
-                          io.mem_port.req.bits.typ := MT_WU
-                          state := s_waiting
-                        }
-                        is (s_waiting) {
-                          when (io.mem_port.resp.valid) {
-                            io.mem_port.req.valid := Bool(false)
-                            io.mem_port.req.bits.addr := Cat(req_addr >> 2, Bits(0, 2))
-                            io.mem_port.req.bits.fcn := M_XRD
-                            io.mem_port.req.bits.typ := MT_WU
-                            val orig_data = io.mem_port.resp.bits.data
-                            val wdata = Fill(num_words_per_cache_line, StoreDataGen(req_data, req_typ))
-                            val wmask = (StoreMask(req_typ) << bit_shift_amt)(block_width-1, 0)
-                            data_bank(cache_idx) := Cat(
-                              // Bits("b11", 2),
-                              Bits("b10", 2),
-                              tag_idx,
-                              (orig_data & ~wmask) | (wdata & wmask)
-                            )
-                            // io.core_port.resp.bits.data := req_data
-                            // io.core_port.resp.valid := Bool(true)
-                            // io.core_port.req.ready := Bool(true)
-                            state := s_ready
-                          } .otherwise {
+                          when (io.mem_port.req.ready) {
                             io.mem_port.req.valid := Bool(true)
                             io.mem_port.req.bits.addr := Cat(req_addr >> 2, Bits(0, 2))
                             io.mem_port.req.bits.fcn := M_XRD
                             io.mem_port.req.bits.typ := MT_WU
+                            state := s_waiting
+                          }
+                        }
+                        is (s_waiting) {
+                          when (io.mem_port.resp.valid) {
+                            val orig_data = io.mem_port.resp.bits.data
+                            val wdata = Fill(num_words_per_cache_line, StoreDataGen(req_data, req_typ))
+                            val wmask = (StoreMask(req_typ) << bit_shift_amt)(block_width-1, 0)
+                            data_bank(cache_idx) := Cat(
+                              Bits("b11", 2),
+                              tag_idx,
+                              (orig_data & ~wmask) | (wdata & wmask)
+                            )
+                            io.core_port.req.ready := Bool(true)
+                            state := s_ready
                           }
                         }
                       }
@@ -207,24 +156,20 @@ package object AcaCustom
                       val state = Reg(init = s_ready)
                       switch (state) {
                         is (s_ready) {
-                          io.mem_port.req.valid := Bool(true)
-                          io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
-                          io.mem_port.req.bits.data := block
-                          io.mem_port.req.bits.fcn := M_XWR
-                          io.mem_port.req.bits.typ := MT_WU
-                          state := s_waiting
-                        }
-                        is (s_waiting) {
-                          when (io.mem_port.resp.valid) {
-                            io.mem_port.req.valid := Bool(false)
-                            data_bank(cache_idx) := Bits(0)
-                            state := s_ready
-                          } .otherwise {
+                          when (io.mem_port.req.ready) {
                             io.mem_port.req.valid := Bool(true)
                             io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, 2))
                             io.mem_port.req.bits.data := block
                             io.mem_port.req.bits.fcn := M_XWR
                             io.mem_port.req.bits.typ := MT_WU
+                            state := s_waiting
+                          }
+                        }
+                        is (s_waiting) {
+                          when (io.mem_port.resp.valid) {
+                  // Flush cache-line to all zero, cache-line is ready for new data
+                            data_bank(cache_idx) := Bits(0)
+                            state := s_ready
                           }
                         }
                       }
@@ -244,10 +189,6 @@ package object AcaCustom
                         is (s_waiting) {
                           when (io.mem_port.resp.valid) {
                             val orig_data = io.mem_port.resp.bits.data
-                            io.mem_port.req.valid := Bool(false)
-                            io.mem_port.req.bits.addr := Cat(req_addr >> 2, Bits(0, 2))
-                            io.mem_port.req.bits.fcn := M_XRD
-                            io.mem_port.req.bits.typ := MT_WU
                             data_bank(cache_idx) := Cat(
                               Bits("b10", 2),
                               tag_idx,
@@ -257,11 +198,6 @@ package object AcaCustom
                             io.core_port.resp.valid := Bool(true)
                             io.core_port.req.ready := Bool(true)
                             state := s_ready
-                          } .otherwise {
-                            io.mem_port.req.valid := Bool(true)
-                            io.mem_port.req.bits.addr := Cat(req_addr >> 2, Bits(0, 2))
-                            io.mem_port.req.bits.fcn := M_XRD
-                            io.mem_port.req.bits.typ := MT_WU
                           }
                         }
                       }
