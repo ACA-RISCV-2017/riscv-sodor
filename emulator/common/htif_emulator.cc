@@ -34,6 +34,8 @@ void htif_emulator_t::tick(
    mem_req_bits_data = 0;
    mem_req_bits_rw = false;
 
+   escape = false;
+
    // if we receive a response back from the chip, send it to the fesvr
    if (csr_rep_valid)
    {
@@ -90,6 +92,12 @@ void htif_emulator_t::tick(
          //   , hdr.seqno, hdr.data_size, hdr.addr);
          assert(hdr.data_size == 1);
           
+
+         // Bypasssssssss
+         escape = true;
+         break;
+
+
          mem_req_valid = true;
          mem_req_bits_addr = hdr.addr*HTIF_DATA_ALIGN;
          mem_req_bits_data = 0;

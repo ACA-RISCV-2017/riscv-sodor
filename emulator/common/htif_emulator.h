@@ -59,6 +59,7 @@ public:
    uint64_t mem_req_bits_data;
    bool     mem_req_bits_rw;
 
+   bool escape;
 
 protected:
    virtual size_t chunk_align() { return 8; }
