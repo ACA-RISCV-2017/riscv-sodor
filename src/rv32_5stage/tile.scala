@@ -30,18 +30,51 @@ class SodorTile(implicit val conf: SodorConfiguration) extends Module
    core.io.dmem <> dcache.io.core_port
    dcache.io.mem_port <> memory.io.core_ports(1)
 
-   // HTIF/memory request
-   memory.io.htif_port.req.valid     := io.host.mem_req.valid
-   memory.io.htif_port.req.bits.addr := io.host.mem_req.bits.addr.toUInt
-   memory.io.htif_port.req.bits.data := io.host.mem_req.bits.data
-   memory.io.htif_port.req.bits.fcn  := Mux(io.host.mem_req.bits.rw, M_XWR, M_XRD)
-   io.host.mem_req.ready             := memory.io.htif_port.req.ready     
+   val htif   = Module(new HTIFCoherencyModule())
+   htif.io.mem_port <> memory.io.htif_port
+   htif.io.cache_port <> dcache.io.htif_port
 
-   // HTIF/memory response
-   io.host.mem_rep.valid := memory.io.htif_port.resp.valid
-   io.host.mem_rep.bits := memory.io.htif_port.resp.bits.data
+   // HTIF/memory request
+   htif.io.htif_port.req.valid     := io.host.mem_req.valid
+   htif.io.htif_port.req.bits.addr := io.host.mem_req.bits.addr.toUInt
+   htif.io.htif_port.req.bits.data := io.host.mem_req.bits.data
+   htif.io.htif_port.req.bits.fcn  := Mux(io.host.mem_req.bits.rw, M_XWR, M_XRD)
+   io.host.mem_req.ready             := htif.io.htif_port.req.ready     
+
+   // HTIF/htif response
+   io.host.mem_rep.valid := htif.io.htif_port.resp.valid
+   io.host.mem_rep.bits := htif.io.htif_port.resp.bits.data
 
    core.io.host <> io.host
 }
- 
+
+class HTIFCoherencyModule(implicit conf: SodorConfiguration) extends Module {
+  val io = new Bundle {
+    val htif_port = (new MemPortIo(data_width=64)).flip
+    val mem_port = new MemPortIo(data_width=64)
+    val cache_port = new MemPortIo(data_width=64)
+  }
+  io.mem_port.req.valid := io.htif_port.req.valid
+  io.mem_port.req.bits.addr := io.htif_port.req.bits.addr
+  io.mem_port.req.bits.data := io.htif_port.req.bits.data
+  io.mem_port.req.bits.fcn  := io.htif_port.req.bits.fcn
+  io.cache_port.req.valid := io.htif_port.req.valid
+  io.cache_port.req.bits.addr := io.htif_port.req.bits.addr
+  io.cache_port.req.bits.data := io.htif_port.req.bits.data
+  io.cache_port.req.bits.fcn  := io.htif_port.req.bits.fcn
+
+  // NOTE: HTIF expects synchronous read.
+  io.htif_port.req.ready := Bool(true)
+  io.htif_port.resp.valid := Reg(
+    next = io.htif_port.req.valid && io.htif_port.req.bits.fcn === M_XRD
+  )
+  io.htif_port.resp.bits.data := Reg(
+    next = Mux(
+      io.cache_port.resp.valid,
+      io.cache_port.resp.bits.data,
+      io.mem_port.resp.bits.data
+    )
+  )
+}
+
 }

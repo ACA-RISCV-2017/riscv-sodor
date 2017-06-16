@@ -10,6 +10,7 @@ package object AcaCustom
     val io = new Bundle {
       val core_port = (new MemPortIo(data_width=conf.xprlen)).flip
       val mem_port = new MemPortIo(data_width=conf.xprlen)
+      val htif_port = (new MemPortIo(data_width=64)).flip
     }
 
     io.mem_port.req.valid := Bool(false)
@@ -206,6 +207,44 @@ package object AcaCustom
             }
           }
           }
+        }
+      }
+    }
+
+    // HTIF
+    io.htif_port.resp.valid := Bool(false)
+    io.htif_port.resp.bits.data := Bits(0)
+    when (io.htif_port.req.valid) {
+      val req_addr = io.htif_port.req.bits.addr
+      val req_data = io.htif_port.req.bits.data
+      val byte_shift_amt = req_addr(idx_width-1, 0)
+      val bit_shift_amt  = byte_shift_amt << 3
+      val data_idx = req_addr >> idx_width
+      val cache_idx = data_idx(cache_idx_width-1, 0)
+      val tag_idx = (data_idx >> cache_idx_width)(tag_width-1, 0)
+      val line = data_bank(cache_idx)
+      val block = line(block_width-1, 0)
+      val tag = (line >> block_width)(tag_width-1, 0)
+      val flag = (line >> (block_width + tag_width))(flag_width-1, 0)
+      val dirty_bit = Bool(flag(0))
+      val valid_bit = Bool(flag(1))
+      when (valid_bit && tag === tag_idx) {
+        when (io.htif_port.req.bits.fcn === M_XWR) {
+          assert(req_addr(2, 0) === Bits(0))
+          val wdata = Cat(
+            Bits("b11", 2),
+            Bits(0, tag_width),
+            Fill(num_bytes_per_cache_line / 8, req_data)
+          )
+          val wmask = Cat(
+            Bits("b11", 2),
+            Bits(0, tag_width),
+            (Fill(64, Bits(1, 1)) << bit_shift_amt)(block_width-1, 0)
+          )
+          data_bank.write(cache_idx, wdata, wmask)
+        } .otherwise {
+          io.htif_port.resp.valid := Bool(true)
+          io.htif_port.resp.bits.data := (block >> bit_shift_amt)(63, 0)
         }
       }
     }
