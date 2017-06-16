@@ -158,10 +158,6 @@ int main(int argc, char** argv)
          , dut.Top__io_htif_mem_rep_bits.lo_word()
       );
 
-      if (htif->escape) {
-        break;
-      }
-
       // send HTIF signals to the chip
       dut.Top__io_htif_csr_rep_ready = htif->csr_rep_ready;
 
