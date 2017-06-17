@@ -26,6 +26,7 @@ package object AcaCustom
 
     val num_bytes_per_cache_line = 64
     val cache_idx_width = 10  // 1024 entries
+    val set_associativity = 4 // 4-way set associative
 
     val num_words_per_cache_line = num_bytes_per_cache_line / 4   // 16
     val num_cache_lines = 1 << cache_idx_width
@@ -48,7 +49,11 @@ package object AcaCustom
     val bit_shift_amt  = byte_shift_amt << 3
 
     val data_idx = req_addr >> idx_width
-    val cache_idx = data_idx(cache_idx_width-1, 0)
+    val cache_idx = if (cache_idx_width == 0) {
+        Bits(0)
+      } else {
+        data_idx(cache_idx_width-1, 0)
+      }
     val tag_idx = (data_idx >> cache_idx_width)(tag_width-1, 0)
     // addr = [tag_idx, cache_idx, byte_shift_amt]
 
@@ -66,6 +71,38 @@ package object AcaCustom
     val flag = (line >> (block_width + tag_width))(flag_width-1, 0)
     val dirty_bit = Bool(flag(0))
     val valid_bit = Bool(flag(1))
+
+    def write_back_cache_block() = {
+      val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
+      val state = Reg(init = s_ready)
+      switch (state) {
+      is (s_ready) {
+        when (io.mem_port.req.ready) {
+          // Send write request to main memory and wait
+          val waddr = if (cache_idx_width == 0) {
+              Cat(tag, Bits(0, idx_width))
+            } else {
+              Cat(tag, cache_idx, Bits(0, idx_width))
+            }
+          io.mem_port.req.valid := Bool(true)
+          io.mem_port.req.bits.addr := waddr
+          for (k <- 0 until 16) {
+            io.mem_port.req.bits.burst_data(k) := block(32 * k + 31, 32 * k)
+          }
+          io.mem_port.req.bits.fcn := M_XWRBURST
+          io.mem_port.req.bits.typ := MT_WU
+          state := s_waiting
+        }
+      }
+      is (s_waiting) {
+        when (io.mem_port.resp.valid) {
+          // Flush cache-line to all zero, cache-line is ready for new data
+          data_bank(cache_idx) := Bits(0)
+          state := s_ready
+        }
+      }
+      }
+    }
 
     // write-back cache
     when (req_valid && req_fcn === M_XWR) {
@@ -90,30 +127,7 @@ package object AcaCustom
         req_ready_reg := Bool(false)
         when (valid_bit && dirty_bit) {
           // Need to write-back dirty data first
-          val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
-          val state = Reg(init = s_ready)
-          switch (state) {
-          is (s_ready) {
-            when (io.mem_port.req.ready) {
-              // Send write request to main memory and wait
-              io.mem_port.req.valid := Bool(true)
-              io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, idx_width))
-              for (k <- 0 until 16) {
-                io.mem_port.req.bits.burst_data(k) := block(32 * k + 31, 32 * k)
-              }
-              io.mem_port.req.bits.fcn := M_XWRBURST
-              io.mem_port.req.bits.typ := MT_WU
-              state := s_waiting
-            }
-          }
-          is (s_waiting) {
-            when (io.mem_port.resp.valid) {
-              // Flush cache-line to all zero, cache-line is ready for new data
-              data_bank(cache_idx) := Bits(0)
-              state := s_ready
-            }
-          }
-          }
+          write_back_cache_block()
         } .otherwise {
           val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
           val state = Reg(init = s_ready)
@@ -156,29 +170,7 @@ package object AcaCustom
         req_ready_reg := Bool(false)
         when (valid_bit && dirty_bit) {
           // Need to write-back dirty data first
-          val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
-          val state = Reg(init = s_ready)
-          switch (state) {
-          is (s_ready) {
-            when (io.mem_port.req.ready) {
-              io.mem_port.req.valid := Bool(true)
-              io.mem_port.req.bits.addr := Cat(tag, cache_idx, Bits(0, idx_width))
-              for (k <- 0 until 16) {
-                io.mem_port.req.bits.burst_data(k) := block(32 * k + 31, 32 * k)
-              }
-              io.mem_port.req.bits.fcn := M_XWRBURST
-              io.mem_port.req.bits.typ := MT_WU
-              state := s_waiting
-            }
-          }
-          is (s_waiting) {
-            when (io.mem_port.resp.valid) {
-              // Flush cache-line to all zero, cache-line is ready for new data
-              data_bank(cache_idx) := Bits(0)
-              state := s_ready
-            }
-          }
-          }
+          write_back_cache_block()
         } .otherwise {
           val s_ready :: s_waiting :: Nil = Enum(UInt(), 2)
           val state = Reg(init = s_ready)
@@ -212,15 +204,22 @@ package object AcaCustom
     }
 
     // HTIF
-    io.htif_port.resp.valid := Bool(false)
-    io.htif_port.resp.bits.data := Bits(0)
+    val htif_resp_valid = Reg(Bool())
+    val htif_resp_rdata = Reg(Bits(width = 64))
+    io.htif_port.resp.valid := htif_resp_valid
+    io.htif_port.resp.bits.data := htif_resp_rdata
+    htif_resp_valid := Bool(false)
     when (io.htif_port.req.valid) {
       val req_addr = io.htif_port.req.bits.addr
       val req_data = io.htif_port.req.bits.data
       val byte_shift_amt = req_addr(idx_width-1, 0)
       val bit_shift_amt  = byte_shift_amt << 3
       val data_idx = req_addr >> idx_width
-      val cache_idx = data_idx(cache_idx_width-1, 0)
+      val cache_idx = if (cache_idx_width == 0) {
+          Bits(0)
+        } else {
+          data_idx(cache_idx_width-1, 0)
+        }
       val tag_idx = (data_idx >> cache_idx_width)(tag_width-1, 0)
       val line = data_bank(cache_idx)
       val block = line(block_width-1, 0)
@@ -243,8 +242,8 @@ package object AcaCustom
           )
           data_bank.write(cache_idx, wdata, wmask)
         } .otherwise {
-          io.htif_port.resp.valid := Bool(true)
-          io.htif_port.resp.bits.data := (block >> bit_shift_amt)(63, 0)
+          htif_resp_valid := Bool(true)
+          htif_resp_rdata := (block >> bit_shift_amt)(63, 0)
         }
       }
     }

@@ -68,12 +68,10 @@ class HTIFCoherencyModule(implicit conf: SodorConfiguration) extends Module {
   io.htif_port.resp.valid := Reg(
     next = io.htif_port.req.valid && io.htif_port.req.bits.fcn === M_XRD
   )
-  io.htif_port.resp.bits.data := Reg(
-    next = Mux(
-      io.cache_port.resp.valid,
-      io.cache_port.resp.bits.data,
-      io.mem_port.resp.bits.data
-    )
+  io.htif_port.resp.bits.data := Mux(
+    io.cache_port.resp.valid,
+    io.cache_port.resp.bits.data,
+    io.mem_port.resp.bits.data
   )
 }
 
