@@ -109,7 +109,7 @@ class ScratchPadMemory(num_core_ports: Int, num_bytes: Int = (1 << 21))(implicit
       val req_data_reg       = Reg(Bits())
       val req_fcn_reg        = Reg(Bits())
       val req_typ_reg        = Reg(Bits())
-      val req_burst_data     = Vec.fill(16) { Reg(Bits(width = 32))}
+      val req_burst_data     = Reg(Vec.fill(16) { Bits(width = 32) })
 
       if (i == 0) {
          req_valid      := io.core_ports(i).req.valid
