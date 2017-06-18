@@ -25,8 +25,8 @@ package object AcaCustom
     io.core_port.req.ready := req_ready_reg
 
     val num_bytes_per_cache_line = 64
-    val cache_idx_width = 8   // 256 entries
-    val set_associativity = 4 // 4-way set associative, total 1024 cache slot
+    val cache_idx_width   = 8   // 256 entries
+    val set_associativity = 4   // 4-way set associative, total 1024 cache slot
 
     val num_words_per_cache_line = num_bytes_per_cache_line / 4   // 16
     val num_cache_sets = 1 << cache_idx_width
@@ -44,7 +44,7 @@ package object AcaCustom
     val cache_line_age = Reg(
       Vec.fill(num_cache_sets) {
         Vec.fill(set_associativity) {
-          Bits(width = log2Up(set_associativity))
+          UInt(width = log2Up(set_associativity))
         }
       }
     )
@@ -67,7 +67,6 @@ package object AcaCustom
     val req_typ        = io.core_port.req.bits.typ
     val byte_shift_amt = req_addr(idx_width-1, 0)
     val bit_shift_amt  = byte_shift_amt << 3
-
     val cache_idx = if (cache_idx_width == 0) {
         Bits(0)
       } else {
@@ -77,6 +76,7 @@ package object AcaCustom
     // addr = [tag_idx, cache_idx, byte_shift_amt]
 
     val cache_hit_vec = Vec.fill(set_associativity) { Bool() }
+    val cache_hit_line = Reg(Bits(width = log2Up(set_associativity)))
     for (i <- 0 until set_associativity) {
       val data = data_bank(i)
       val line = data(cache_idx)
@@ -87,15 +87,31 @@ package object AcaCustom
       val valid_bit = Bool(flag(1))
       when (valid_bit && tag === tag_idx) {
         cache_hit_vec(i) := Bool(true)
+        cache_hit_line := Bits(i)
       } .otherwise {
         cache_hit_vec(i) := Bool(false)
       }
     }
 
+    val lru = cache_line_age(cache_idx)
+    def is_update_line(lineno: Int) : Bool = {
+      lru(lineno) === UInt(0)
+    }
+
+    def lru_update_line(lineno: UInt) = {
+      lru(lineno) := UInt(set_associativity - 1)
+      for (i <- 0 until set_associativity) {
+        when (lru(i) > lru(lineno)) {
+          lru(i) := lru(i) - UInt(1)
+        }
+      }
+    }
+
     // FIXME: HACKY CODE!!!
     val processing_outstanding_miss = Reg(init = Bool(false))
+    val cache_hit = cache_hit_vec.toBits != Bits(0)
     when (req_valid) {
-    when (cache_hit_vec.toBits != Bits(0) && ~processing_outstanding_miss) {
+    when (cache_hit) {
       // cache hit
       when (req_fcn === M_XWR) {
         val wdata = Cat(
@@ -123,39 +139,30 @@ package object AcaCustom
           }
         }
       }
-      val hit_line = Reg(Bits(0, log2Up(set_associativity)))
-      for (i <- 0 until set_associativity) {
-        when (cache_hit_vec(i)) {
-          hit_line := Bits(i)
-        }
-      }
-      for (i <- 0 until set_associativity) {
-        when (cache_line_age(cache_idx)(i) > cache_line_age(cache_idx)(hit_line)) {
-          cache_line_age(cache_idx)(i) := cache_line_age(cache_idx)(i) - UInt(1)
-        }
-      }
-      cache_line_age(cache_idx)(hit_line) := UInt(set_associativity - 1)
+      lru_update_line(cache_hit_line)
       io.core_port.resp.valid := Bool(true)
       req_ready_reg := Bool(true)
-    } .otherwise {
+    }
+    when (~cache_hit || processing_outstanding_miss) {
       // cache miss
       processing_outstanding_miss := Bool(true)
-      val resp_rdata = Reg(Bits())
       val need_write_back = Reg(Bool())
       val wb_addr = Reg(Bits())
       val wb_data = Reg(Vec.fill(16) { Bits(width = 32) })
-      val s_ready :: s_read_block :: s_write_block :: s_waiting :: Nil = Enum(UInt(), 4)
+
+      val s_ready :: s_read_block :: s_write_block :: Nil = Enum(UInt(), 3)
       val state = Reg(init = s_ready)
       switch (state) {
       is (s_ready) {
         when (io.mem_port.req.ready) {
+          // linefill: read new cache line (block)
           io.mem_port.req.valid := Bool(true)
           io.mem_port.req.bits.addr := Cat(req_addr >> idx_width, Bits(0, idx_width))
           io.mem_port.req.bits.fcn := M_XRD
           io.mem_port.req.bits.typ := MT_WU
           need_write_back := Bool(false)
           for (i <- 0 until set_associativity) {
-            when (cache_line_age(cache_idx)(i) === UInt(0)) {
+            when (is_update_line(i)) {
               val data = data_bank(i)
               val line = data(cache_idx)
               val block = line(block_width-1, 0)
@@ -164,6 +171,8 @@ package object AcaCustom
               val dirty_bit = Bool(flag(0))
               val valid_bit = Bool(flag(1))
               when (valid_bit && dirty_bit) {
+                // we are going to replace a dirty block, so remember to write
+                // back dirty block after linefill
                 need_write_back := Bool(true)
                 if (cache_idx_width == 0) {
                   wb_addr := Cat(tag, Bits(0, idx_width))
@@ -181,11 +190,13 @@ package object AcaCustom
       }
       is (s_read_block) {
         when (io.mem_port.resp.valid) {
+          // linefill data ready: fill in the new line and prepare to write back
+          // dirty line (if there is any)
           val orig_data = io.mem_port.resp.bits.burst_data.toBits
           val wdata = Fill(num_words_per_cache_line, StoreDataGen(req_data, req_typ))
           val wmask = (StoreMask(req_typ) << bit_shift_amt)(block_width-1, 0)
           for (i <- 0 until set_associativity) {
-            when (cache_line_age(cache_idx)(i) === UInt(0)) {
+            when (is_update_line(i)) {
               when (req_fcn === M_XWR) {
                 data_bank(i)(cache_idx) := Cat(
                   Bits("b11", 2),
@@ -201,20 +212,8 @@ package object AcaCustom
               }
             }
           }
-          val hit_line = Reg(Bits(0, log2Up(set_associativity)))
-          for (i <- 0 until set_associativity) {
-            when (cache_hit_vec(i)) {
-              hit_line := Bits(i)
-            }
-          }
-          for (i <- 0 until set_associativity) {
-            when (cache_line_age(cache_idx)(i) > cache_line_age(cache_idx)(hit_line)) {
-              cache_line_age(cache_idx)(i) := cache_line_age(cache_idx)(i) - UInt(1)
-            }
-          }
-          cache_line_age(cache_idx)(hit_line) := UInt(set_associativity - 1)
+          lru_update_line(cache_hit_line)
           when (need_write_back) {
-            resp_rdata := LoadDataGen(orig_data >> bit_shift_amt, req_typ)
             state := s_write_block
           } .otherwise {
             io.core_port.resp.valid := Bool(true)
@@ -235,9 +234,6 @@ package object AcaCustom
           }
           io.mem_port.req.bits.fcn := M_XWRBURST
           io.mem_port.req.bits.typ := MT_WU
-
-          io.core_port.resp.bits.data := resp_rdata
-          io.core_port.resp.valid := Bool(true)
           processing_outstanding_miss := Bool(false)
           req_ready_reg := Bool(true)
           state := s_ready
