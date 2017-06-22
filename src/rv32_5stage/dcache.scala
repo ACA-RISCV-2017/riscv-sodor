@@ -33,8 +33,9 @@ package object AcaCustom
       val peek_resp = Decoupled(new WriteBufferReq())
     }
 
+    val s_invalid :: s_valid :: s_written :: Nil = Enum(Bits(), 3)
+    val data_valid = Reg(init = Vec(Seq.fill(entries)(s_invalid)))
     val data = Reg(Vec.fill(entries) { new WriteBufferReq() })
-    val data_valid = Reg(init = Vec(Seq.fill(entries)(Bool(false))))
     val enq_ptr = RegCounter(entries)
     val deq_ptr = RegCounter(entries)
     val num_entries = RegCounter(entries+1)
@@ -55,52 +56,53 @@ package object AcaCustom
       // If the address to be enqueued is alrealdy in write queue, invalid the
       // entries already in it (This should never happen)
       for (i <- 0 until entries) {
-        when (data(i).addr === io.enq.bits.addr && data_valid(i)) {
-          data_valid(i) := Bool(false)
+        when (data(i).addr === io.enq.bits.addr && data_valid(i) != s_invalid && enq_ptr.value != UInt(i)) {
+          assert(data_valid(i) === s_written)
+          data_valid(i) := s_invalid
           printf("COL %x %x\n", data(i).addr, data(i).burst_data.toBits)
-          // UNREACHABLE
-          assert(Bool(false))
         }
       }
+      printf("ENQ EX %x %x\n", data(enq_ptr.value).addr, data(enq_ptr.value).burst_data.toBits)
       data(enq_ptr.value) := io.enq.bits
-      data_valid(enq_ptr.value) := Bool(true)
+      data_valid(enq_ptr.value) := s_valid
       enq_ptr.inc()
     }
-    when (~is_empty && data_valid(deq_ptr.value) && io.mem_port.req.ready) {
+    when (~is_empty && data_valid(deq_ptr.value) === s_valid && io.mem_port.req.ready) {
       printf("DEQ %x %x\n", data(deq_ptr.value).addr, data(deq_ptr.value).burst_data.toBits)
       io.mem_port.req.valid := Bool(true)
       io.mem_port.req.bits := data(deq_ptr.value)
       io.mem_port.req.bits.fcn := M_XWRBURST
-      data_valid(deq_ptr.value) := Bool(false)
+      data_valid(deq_ptr.value) := s_written
       deq_ptr.inc()
     }
-    .elsewhen (~is_empty && ~data_valid(deq_ptr.value)) {
+    .elsewhen (~is_empty && data_valid(deq_ptr.value) != s_valid) {
+      assert(data_valid(deq_ptr.value) === s_invalid)
       printf("DEQINV %x %x\n", data(deq_ptr.value).addr, data(deq_ptr.value).burst_data.toBits)
       deq_ptr.inc()
     }
 
     // Updating num_entries is a bit tricky...
     when (~is_full && io.enq.valid) {
-      when (~is_empty && data_valid(deq_ptr.value) && io.mem_port.req.ready) {
+      when (~is_empty && data_valid(deq_ptr.value) === s_valid && io.mem_port.req.ready) {
         // No need to update num_entries
       }
-      .elsewhen (~is_empty && ~data_valid(deq_ptr.value)) {
+      .elsewhen (~is_empty && data_valid(deq_ptr.value) != s_valid) {
         // No need to update num_entries
       }
       .otherwise {
         num_entries.inc()
       }
     } .otherwise {
-      when (~is_empty && data_valid(deq_ptr.value) && io.mem_port.req.ready) {
+      when (~is_empty && data_valid(deq_ptr.value) === s_valid && io.mem_port.req.ready) {
         num_entries.dec()
       }
-      .elsewhen (~is_empty && ~data_valid(deq_ptr.value)) {
+      .elsewhen (~is_empty && data_valid(deq_ptr.value) != s_valid) {
         num_entries.dec()
       }
     }
 
     for (i <- 0 until entries) {
-      when (data_valid(i) && data(i).addr === io.peek_req.bits.addr) {
+      when (data_valid(i) != s_invalid && data(i).addr === io.peek_req.bits.addr) {
         io.peek_resp.valid := Bool(true)
         io.peek_resp.bits.burst_data := data(i).burst_data
       }
@@ -111,8 +113,14 @@ package object AcaCustom
     // when valid is true => real-peek (will invalid peeked entry)
     when (io.peek_req.valid) {
       for (i <- 0 until entries) {
-        when (data_valid(i) && data(i).addr === io.peek_req.bits.addr) {
-          data_valid(i) := Bool(false)
+        // This disgusting thing is for avoiding racing with ENQ
+        // TODO: Use a better way, perhaps redo this whole thing with a FSM
+        when (data_valid(i) != s_invalid && data(i).addr === io.peek_req.bits.addr) {
+          when (data_valid(i) === s_valid) {
+            unless (~is_empty && data_valid(deq_ptr.value) === s_valid && io.mem_port.req.ready && UInt(i) === deq_ptr.value) {
+              data_valid(i) := s_invalid
+            }
+          }
         }
       }
     }
@@ -127,9 +135,9 @@ package object AcaCustom
     }
 
     val num_bytes_per_cache_line = 64
-    val cache_idx_width   = 10  // 1024 entries
+    val cache_idx_width   =  3  // 1024 entries
     val set_associativity =  1  // direct mapped cache
-    val write_buffer_size =  4
+    val write_buffer_size =  1
 
     val num_words_per_cache_line = num_bytes_per_cache_line / 4   // 16
     val num_cache_sets = 1 << cache_idx_width
@@ -179,6 +187,20 @@ package object AcaCustom
     val tag_idx = (req_addr >> (idx_width + cache_idx_width))(tag_width-1, 0)
     // addr = [tag_idx, cache_idx, byte_shift_amt]
 
+    val lru = cache_line_age(cache_idx)
+    def is_lru_replace_line(lineno: Int) : Bool = {
+      lru(lineno) === UInt(0)
+    }
+
+    def update_lru_line_age(lineno: Int) = {
+      lru(lineno) := UInt(set_associativity - 1)
+      for (i <- 0 until set_associativity) {
+        when (lru(i) > lru(lineno)) {
+          lru(i) := lru(i) - UInt(1)
+        }
+      }
+    }
+
     val write_buffer = Module(new WriteBuffer(write_buffer_size))
     write_buffer.io.enq.valid := Bool(false)
     write_buffer.io.enq.bits.addr := Bits(0)
@@ -196,6 +218,7 @@ package object AcaCustom
     io.core_port.req.ready := req_ready_reg
 
     val cache_hit_vec = Vec.fill(set_associativity) { Bool() }
+    val cache_hit = orR(cache_hit_vec.toBits)
     for (i <- 0 until set_associativity) {
       val data = data_bank(i)
       val line = data(cache_idx)
@@ -204,25 +227,7 @@ package object AcaCustom
       val flag = (line >> (block_width + tag_width))(flag_width-1, 0)
       val dirty_bit = Bool(flag(0))
       val valid_bit = Bool(flag(1))
-      when (valid_bit && tag === tag_idx) {
-        cache_hit_vec(i) := Bool(true)
-      } .otherwise {
-        cache_hit_vec(i) := Bool(false)
-      }
-    }
-
-    val lru = cache_line_age(cache_idx)
-    def is_lru_replace_line(lineno: Int) : Bool = {
-      lru(lineno) === UInt(0)
-    }
-
-    def update_lru_line_age(lineno: Int) = {
-      lru(lineno) := UInt(set_associativity - 1)
-      for (i <- 0 until set_associativity) {
-        when (lru(i) > lru(lineno)) {
-          lru(i) := lru(i) - UInt(1)
-        }
-      }
+      cache_hit_vec(i) := valid_bit && tag === tag_idx
     }
 
     val line_evict_cause_wb = Bool()
@@ -242,7 +247,6 @@ package object AcaCustom
       }
     }
 
-    val cache_hit = cache_hit_vec.toBits != Bits(0)
     when (req_valid) {
     when (cache_hit) {
       // cache hit
@@ -411,6 +415,9 @@ package object AcaCustom
     io.htif_port.resp.valid := htif_resp_valid
     io.htif_port.resp.bits.data := htif_resp_rdata
     htif_resp_valid := Bool(false)
+    val htif_cache_hit_vec = Vec.fill(set_associativity) { Bool() }
+    val htif_cache_hit = orR(htif_cache_hit_vec.toBits)
+    htif_cache_hit_vec := Bits(0)
     when (io.htif_port.req.valid) {
       val req_addr = io.htif_port.req.bits.addr
       val req_data = io.htif_port.req.bits.data
@@ -429,8 +436,8 @@ package object AcaCustom
         val flag = (line >> (block_width + tag_width))(flag_width-1, 0)
         val dirty_bit = Bool(flag(0))
         val valid_bit = Bool(flag(1))
+        htif_cache_hit_vec(i) := valid_bit && tag === tag_idx
         when (valid_bit && tag === tag_idx) {
-          cache_hit_vec(i) := Bool(true)
           when (io.htif_port.req.bits.fcn === M_XWR) {
             assert(req_addr(2, 0) === Bits(0))
             val wdata = Cat(
@@ -448,12 +455,9 @@ package object AcaCustom
             htif_resp_valid := Bool(true)
             htif_resp_rdata := (block >> bit_shift_amt)(63, 0)
           }
-        } .otherwise {
-          cache_hit_vec(i) := Bool(false)
         }
       }
-      val cache_hit = cache_hit_vec.toBits != Bits(0)
-      when (~cache_hit) {
+      when (~htif_cache_hit) {
         write_buffer.io.peek_req.bits.addr := req_addr
         when (write_buffer.io.peek_resp.valid) {
           val block = write_buffer.io.peek_resp.bits.burst_data.toBits
