@@ -25,8 +25,8 @@ package object AcaCustom
     io.core_port.req.ready := req_ready_reg
 
     val num_bytes_per_cache_line = 64
-    val cache_idx_width   = 10  // 1024 entries
-    val set_associativity =  1  // direct mapped cache
+    val cache_idx_width   =  0  // 1024 entries
+    val set_associativity =  8  // direct mapped cache
 
     val num_words_per_cache_line = num_bytes_per_cache_line / 4   // 16
     val num_cache_sets = 1 << cache_idx_width
@@ -212,7 +212,11 @@ package object AcaCustom
               }
             }
           }
-          lru_update_line(cache_hit_line)
+          for (i <- 0 until set_associativity) {
+            when (is_update_line(i)) {
+              lru_update_line(UInt(i))
+            }
+          }
           when (need_write_back) {
             state := s_write_block
           } .otherwise {
