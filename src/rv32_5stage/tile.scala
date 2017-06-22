@@ -12,6 +12,7 @@ import Constants._
 import Common._   
 import Common.Util._   
 import AcaCustom._
+import AcaCustomVictimCache._
 
 class SodorTileIo extends Bundle  
 {
@@ -24,11 +25,13 @@ class SodorTile(implicit val conf: SodorConfiguration) extends Module
    
    val core   = Module(new Core(resetSignal = io.host.reset))
    val memory = Module(new ScratchPadMemory(num_core_ports = 2))
+   val victim_cache = Module(new VictimCache())
    val dcache = Module(new DCache())
 
    core.io.imem <> memory.io.core_ports(0)
    core.io.dmem <> dcache.io.core_port
-   dcache.io.mem_port <> memory.io.core_ports(1)
+   dcache.io.mem_port <> victim_cache.io.cache_port
+   victim_cache.io.mem_port <> memory.io.core_ports(1)
 
    val htif   = Module(new HTIFCoherencyModule())
    htif.io.mem_port <> memory.io.htif_port
